@@ -1,0 +1,934 @@
+Below is the complete source code for the interactive Mars map system, including the full-screen interactive tactical map (src/components/TacticalMapModal.tsx), objective/navigation logic (src/game/navigationGuide.ts), the live corner minimap (src/components/ColonyHud.tsx), and the required map constants, types, styles, and App.tsx wiring.
+1. Interactive Tactical Map Modal (src/components/TacticalMapModal.tsx)
+Tsx
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { motion } from 'motion/react';
+import { CheckCircle2, Compass, Lock, MapPin, Navigation, X } from 'lucide-react';
+import {
+  CRASH_SAFE_RADIUS_PX,
+  CRASH_SITE_POS,
+  MAP_H,
+  MAP_W,
+  SCANNER_TRAIL_POINTS,
+  TILE_SIZE,
+} from '../game/mapData';
+import {
+  NavigationObjective,
+  ObjectivePinId,
+  buildNavigationObjectives,
+  resolveActiveObjective,
+} from '../game/navigationGuide';
+import { soundFX } from '../game/audio';
+import { PlayerState, StructureEntity, SurvivalStats, TileType } from '../game/types';
+
+interface TacticalMapModalProps {
+  tiles: TileType[][];
+  structures: StructureEntity[];
+  player: PlayerState;
+  stats: SurvivalStats;
+  trackedObjectiveId: ObjectivePinId | null;
+  onTrackObjective: (id: ObjectivePinId | null) => void;
+  onWalkToObjective: (obj: NavigationObjective) => void;
+  onClose: () => void;
+}
+
+const SCALE = 10; // 56*10 = 560 x 38*10 = 380 native crisp pixels
+
+export const TacticalMapModal: React.FC<TacticalMapModalProps> = ({
+  tiles,
+  structures,
+  player,
+  stats,
+  trackedObjectiveId,
+  onTrackObjective,
+  onWalkToObjective,
+  onClose,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const objectives = useMemo(() => buildNavigationObjectives(stats, player), [stats, player]);
+  const activeObj = useMemo(
+    () => resolveActiveObjective(objectives, trackedObjectiveId),
+    [objectives, trackedObjectiveId]
+  );
+
+  const [selectedId, setSelectedId] = useState<ObjectivePinId>(activeObj.id);
+  const selectedObj = useMemo(
+    () => objectives.find((o) => o.id === selectedId) ?? activeObj,
+    [objectives, selectedId, activeObj]
+  );
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Escape' || e.code === 'KeyG') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [onClose]);
+
+  useEffect(() => {
+    let raf = 0;
+    const draw = (now: number) => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const time = now / 1000;
+          ctx.imageSmoothingEnabled = false;
+
+          // 1. Render Mars Terrain Grid
+          for (let ty = 0; ty < MAP_H; ty++) {
+            for (let tx = 0; tx < MAP_W; tx++) {
+              const t = tiles[ty][tx];
+              ctx.fillStyle =
+                t === 'mountain_wall'
+                  ? '#3d1712'
+                  : t === 'ridge_rock'
+                  ? '#75311c'
+                  : t === 'crater_floor'
+                  ? '#6b2c17'
+                  : t === 'crater_rim'
+                  ? '#b95f3a'
+                  : t === 'scorch'
+                  ? '#4a1f14'
+                  : '#994426';
+              ctx.fillRect(tx * SCALE, ty * SCALE, SCALE, SCALE);
+            }
+          }
+
+          // Subtle grid lines
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.14)';
+          ctx.lineWidth = 1;
+          for (let x = 0; x <= MAP_W; x += 4) {
+            ctx.beginPath();
+            ctx.moveTo(x * SCALE, 0);
+            ctx.lineTo(x * SCALE, MAP_H * SCALE);
+            ctx.stroke();
+          }
+          for (let y = 0; y <= MAP_H; y += 4) {
+            ctx.beginPath();
+            ctx.moveTo(0, y * SCALE);
+            ctx.lineTo(MAP_W * SCALE, y * SCALE);
+            ctx.stroke();
+          }
+
+          // 2. Crash Site Safe Ring
+          const rcx = ((CRASH_SITE_POS.tx + CRASH_SITE_POS.w / 2) * SCALE);
+          const rcy = ((CRASH_SITE_POS.ty + CRASH_SITE_POS.h / 2) * SCALE);
+          const safeR = (CRASH_SAFE_RADIUS_PX / TILE_SIZE) * SCALE;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.arc(rcx, rcy, safeR, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+
+          // 3. Salvage Sites (Orange dots = available, Gray = salvaged)
+          for (const s of structures) {
+            if (s.category !== 'exploration_site') continue;
+            const sx = (s.tx + s.w / 2) * SCALE;
+            const sy = (s.ty + s.h / 2) * SCALE;
+            ctx.fillStyle = s.salvaged ? 'rgba(148, 163, 184, 0.45)' : '#fb923c';
+            ctx.fillRect(Math.round(sx - 3), Math.round(sy - 3), 6, 6);
+          }
+
+          // 4. Opportunity Scanner Trail (if unlocked)
+          if (stats.story.scannerTrailActive) {
+            ctx.save();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            SCANNER_TRAIL_POINTS.forEach((pt, idx) => {
+              const mx = (pt.x / TILE_SIZE) * SCALE;
+              const my = (pt.y / TILE_SIZE) * SCALE;
+              if (idx === 0) ctx.moveTo(mx, my);
+              else ctx.lineTo(mx, my);
+            });
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 5. Dashed Guidance Route Line from ROOK to Selected Objective
+          const px = (player.x / TILE_SIZE) * SCALE;
+          const py = (player.y / TILE_SIZE) * SCALE;
+          const tx = (selectedObj.targetX / TILE_SIZE) * SCALE;
+          const ty = (selectedObj.targetY / TILE_SIZE) * SCALE;
+
+          ctx.save();
+          ctx.strokeStyle = '#fde047';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 5]);
+          ctx.lineDashOffset = -time * 24;
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.lineTo(tx, ty);
+          ctx.stroke();
+          ctx.restore();
+
+          // 6. Numbered Story Pins + Pathfinder + Ship
+          for (const obj of objectives) {
+            // Avoid overlapping Pin 1 and Ship completely by offsetting Ship slightly down-left
+            const ox =
+              obj.id === 'crashed_rocket'
+                ? (obj.targetX / TILE_SIZE) * SCALE - 12
+                : obj.id === 'escape_wreck'
+                ? (obj.targetX / TILE_SIZE) * SCALE + 12
+                : (obj.targetX / TILE_SIZE) * SCALE;
+            const oy = (obj.targetY / TILE_SIZE) * SCALE;
+
+            const isSelected = obj.id === selectedObj.id;
+            const isTracked = obj.id === activeObj.id;
+
+            if (isSelected || isTracked) {
+              const pulseR = 13 + Math.sin(time * 5) * 2.5;
+              ctx.strokeStyle = isSelected ? '#fde047' : '#38bdf8';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(ox, oy, pulseR, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+
+            ctx.fillStyle = obj.completed
+              ? '#15803d'
+              : obj.id === 'crashed_rocket'
+              ? '#0284c7'
+              : isSelected
+              ? '#d97706'
+              : '#1e293b';
+            ctx.strokeStyle = obj.completed
+              ? '#4ade80'
+              : isSelected
+              ? '#fde047'
+              : '#fbbf24';
+            ctx.lineWidth = 2;
+            ctx.fillRect(Math.round(ox - 9), Math.round(oy - 9), 18, 18);
+            ctx.strokeRect(Math.round(ox - 9), Math.round(oy - 9), 18, 18);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 10px "Silkscreen", monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(obj.pin, ox, oy + 0.5);
+          }
+
+          // 7. ROOK Live Position Marker
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(Math.round(px - 6), Math.round(py - 6), 12, 12);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(Math.round(px - 4), Math.round(py - 4), 8, 8);
+          ctx.fillStyle = '#ea580c';
+          ctx.fillRect(Math.round(px - 2), Math.round(py - 2), 4, 4);
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [activeObj.id, objectives, player.x, player.y, selectedObj, stats.story.scannerTrailActive, structures, tiles]);
+
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = ((e.clientX - rect.left) / rect.width) * (MAP_W * SCALE);
+    const cy = ((e.clientY - rect.top) / rect.height) * (MAP_H * SCALE);
+
+    let closest: NavigationObjective | null = null;
+    let bestD = 26;
+    for (const obj of objectives) {
+      const ox =
+        obj.id === 'crashed_rocket'
+          ? (obj.targetX / TILE_SIZE) * SCALE - 12
+          : obj.id === 'escape_wreck'
+          ? (obj.targetX / TILE_SIZE) * SCALE + 12
+          : (obj.targetX / TILE_SIZE) * SCALE;
+      const oy = (obj.targetY / TILE_SIZE) * SCALE;
+      const d = Math.hypot(cx - ox, cy - oy);
+      if (d < bestD) {
+        bestD = d;
+        closest = obj;
+      }
+    }
+    if (closest) {
+      soundFX.playUiClick();
+      setSelectedId(closest.id);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/78 flex items-center justify-center p-2 sm:p-4">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="pixel-panel-dark w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden text-stone-100"
+      >
+        {/* Header */}
+        <div className="bg-[#343940] border-b-2 border-[#15171a] px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <Compass className="w-5 h-5 text-amber-300" />
+            <div>
+              <h2 className="font-pixel text-sm sm:text-base text-[#e8cf79]">
+                MARS TACTICAL MAP & MISSION GUIDE
+              </h2>
+              <p className="text-[11px] text-stone-300">
+                Click any numbered pin or objective on the right to see instructions and set a route for ROOK
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close tactical map"
+            className="pixel-btn bg-[#4a5059] hover:bg-[#5a616b] p-1.5 text-stone-100 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Main 2-Column Body */}
+        <div className="p-4 overflow-y-auto grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+          {/* Left: Full Mars Sector Canvas */}
+          <div className="lg:col-span-7 flex flex-col justify-between gap-2.5">
+            <div className="bg-[#1b0d0a] border-2 border-[#3e434a] overflow-hidden">
+              <canvas
+                ref={canvasRef}
+                width={MAP_W * SCALE}
+                height={MAP_H * SCALE}
+                onClick={handleCanvasClick}
+                className="w-full h-auto block pixelated cursor-pointer"
+              />
+            </div>
+
+            {/* Clean Legend Row */}
+            <div className="bg-[#23262a] border border-[#3e434a] px-3 py-2 flex flex-wrap items-center justify-between gap-3 text-[11px] font-mono-tabular text-stone-300">
+              <span>White Square: ROOK</span>
+              <span className="text-amber-300">1–6: Story Missions</span>
+              <span className="text-sky-300">S: Ares IV · P: Pathfinder</span>
+              <span className="text-orange-300">Orange Dots: Salvage</span>
+            </div>
+          </div>
+
+          {/* Right: Sequential Mission List + Selected Instructions */}
+          <div className="lg:col-span-5 flex flex-col justify-between gap-3">
+            {/* Objective List */}
+            <div className="bg-[#22262b] border border-[#3e434a] p-2.5 space-y-1 max-h-60 overflow-y-auto">
+              {objectives.map((obj) => {
+                const isSelected = obj.id === selectedObj.id;
+                const isTracked = obj.id === activeObj.id;
+                return (
+                  <button
+                    key={obj.id}
+                    type="button"
+                    onClick={() => {
+                      soundFX.playUiClick();
+                      setSelectedId(obj.id);
+                    }}
+                    className={`w-full px-2.5 py-2 text-left flex items-center justify-between gap-2 text-xs transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-[#363d47] border border-amber-400/70 text-white'
+                        : 'bg-[#1a1d21] hover:bg-[#2a2f36] border border-transparent text-stone-300'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span
+                        className={`w-5 h-5 font-pixel text-[10px] flex items-center justify-center shrink-0 border ${
+                          obj.completed
+                            ? 'bg-emerald-800/70 border-emerald-400 text-emerald-200'
+                            : isTracked
+                            ? 'bg-amber-600 border-amber-300 text-white'
+                            : 'bg-[#2c3138] border-[#4d5560] text-stone-200'
+                        }`}
+                      >
+                        {obj.pin}
+                      </span>
+                      <div className="truncate">
+                        <div className="font-semibold truncate">{obj.title}</div>
+                        <div className="text-[10px] text-stone-400 truncate">
+                          {obj.sector}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0 font-mono-tabular text-[11px]">
+                      <span className="text-stone-400">
+                        {obj.bearing} {obj.distanceMeters}m
+                      </span>
+                      {obj.completed && (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Selected Objective Detailed Instructions */}
+            <div className="bg-[#23262a] border-2 border-[#464e58] p-3.5 space-y-3 flex-1 flex flex-col justify-between">
+              <div className="space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-pixel text-xs text-[#e8cf79]">
+                      [{selectedObj.pin}] {selectedObj.title}
+                    </div>
+                    <div className="text-[11px] font-mono-tabular text-sky-300 mt-0.5">
+                      Direction: {selectedObj.bearing} · Distance: {selectedObj.distanceMeters}m · {selectedObj.sector}
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[10px] font-pixel px-2 py-0.5 border shrink-0 ${
+                      selectedObj.completed
+                        ? 'bg-emerald-900/50 border-emerald-400 text-emerald-300'
+                        : 'bg-amber-900/40 border-amber-400 text-amber-300'
+                    }`}
+                  >
+                    {selectedObj.completed ? 'DONE' : 'ACTIVE'}
+                  </span>
+                </div>
+
+                <p className="text-xs text-stone-200 leading-relaxed">
+                  {selectedObj.instructions}
+                </p>
+
+                {selectedObj.lockedReason && (
+                  <div className="bg-[#2c1f1a] border border-amber-500/50 px-2.5 py-1.5 text-[11px] text-amber-200 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                    <span>{selectedObj.lockedReason}</span>
+                  </div>
+                )}
+
+                <div className="bg-[#1b1e22] border border-[#333840] px-2.5 py-2 text-[11px] space-y-1">
+                  <div className="text-sky-300 font-semibold">
+                    Controls: {selectedObj.controlsCue}
+                  </div>
+                  <div className="text-emerald-300">Reward: {selectedObj.reward}</div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFX.playUiClick();
+                    onTrackObjective(selectedObj.id);
+                  }}
+                  className="pixel-btn flex-1 bg-[#3a4048] hover:bg-[#49515c] text-stone-100 px-3 py-2 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <MapPin className="w-3.5 h-3.5 text-amber-300" />
+                  <span>
+                    {trackedObjectiveId === selectedObj.id
+                      ? 'Pinned on Minimap'
+                      : 'Pin Route'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFX.playUiClick();
+                    onWalkToObjective(selectedObj);
+                  }}
+                  className="pixel-btn flex-1 bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Navigation className="w-3.5 h-3.5" />
+                  <span>Guide ROOK Here</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+2. Navigation Objectives & Compass Logic (src/game/navigationGuide.ts)
+Ts
+import { OPPORTUNITY_TILE, ROVER_TRACKS_TILE, TILE_SIZE } from './mapData';
+import { PlayerState, SurvivalStats } from './types';
+
+export type ObjectivePinId =
+  | 'escape_wreck'
+  | 'battery_rush'
+  | 'canyon_run'
+  | 'opportunity_explorer'
+  | 'dust_devil_chase'
+  | 'systems_repair'
+  | 'rover_recovery'
+  | 'crashed_rocket';
+
+export interface NavigationObjective {
+  id: ObjectivePinId;
+  pin: string;
+  order: number;
+  title: string;
+  sector: string;
+  targetX: number;
+  targetY: number;
+  walkX: number;
+  walkY: number;
+  completed: boolean;
+  lockedReason?: string;
+  instructions: string;
+  controlsCue: string;
+  reward: string;
+  bearing: string;
+  distanceMeters: number;
+}
+
+export function getCompassBearing(dx: number, dy: number): string {
+  const angle = Math.atan2(dy, dx); // radians, 0 = East, -PI/2 = North
+  const deg = ((angle * 180) / Math.PI + 360) % 360;
+  if (deg >= 337.5 || deg < 22.5) return 'E';
+  if (deg < 67.5) return 'SE';
+  if (deg < 112.5) return 'S';
+  if (deg < 157.5) return 'SW';
+  if (deg < 202.5) return 'W';
+  if (deg < 247.5) return 'NW';
+  if (deg < 292.5) return 'N';
+  return 'NE';
+}
+
+export function buildNavigationObjectives(
+  stats: SurvivalStats,
+  player: PlayerState
+): NavigationObjective[] {
+  const { story, pathfinderMission, rocket } = stats;
+  const shipDone =
+    rocket.hull >= 100 &&
+    rocket.engines >= 100 &&
+    rocket.avionics >= 100 &&
+    rocket.powerCore >= 100 &&
+    rocket.cushioning >= 100;
+
+  const oppTarget = story.scannerTrailActive
+    ? {
+        x: (OPPORTUNITY_TILE.tx + 1.5) * TILE_SIZE,
+        y: (OPPORTUNITY_TILE.ty + 1) * TILE_SIZE,
+        wx: (OPPORTUNITY_TILE.tx - 0.8) * TILE_SIZE,
+        wy: (OPPORTUNITY_TILE.ty + 1) * TILE_SIZE,
+        sector: 'Robot Graveyard (SE)',
+        instructions:
+          'Follow the glowing cyan scanner trail east to the abandoned Opportunity rover, then press E to investigate and unlock its archive.',
+        controlsCue: 'Press E at Opportunity Rover',
+      }
+    : {
+        x: (ROVER_TRACKS_TILE.tx + 1) * TILE_SIZE,
+        y: (ROVER_TRACKS_TILE.ty + 0.5) * TILE_SIZE,
+        wx: (ROVER_TRACKS_TILE.tx + 0.5) * TILE_SIZE,
+        wy: (ROVER_TRACKS_TILE.ty + 0.5) * TILE_SIZE,
+        sector: 'Robot Graveyard Entry (SE)',
+        instructions:
+          'Walk to the fossilized rover tracks in the southeast crater edge and press F (or Scan) so PIP reveals the glowing trail to Opportunity.',
+        controlsCue: 'Press F / E on Tracks to Scan',
+      };
+
+  const rawDefs: Array<{
+    id: ObjectivePinId;
+    pin: string;
+    order: number;
+    title: string;
+    sector: string;
+    tx: number;
+    ty: number;
+    wx: number;
+    wy: number;
+    completed: boolean;
+    lockedReason?: string;
+    instructions: string;
+    controlsCue: string;
+    reward: string;
+  }> = [
+    {
+      id: 'escape_wreck',
+      pin: '1',
+      order: 1,
+      title: 'Escape the Wreck',
+      sector: 'Central Crash Site',
+      tx: 28 * TILE_SIZE,
+      ty: 19 * TILE_SIZE,
+      wx: 28.5 * TILE_SIZE,
+      wy: 21.8 * TILE_SIZE,
+      completed: story.jetpackUnlocked,
+      instructions:
+        'Interact with the Crashed Spacecraft (Ares IV) in the center of the map and click "Escape Wreck" to auto-run past burning debris and collect 10 Jetpack Fuel Cells.',
+      controlsCue: 'Press E at Spacecraft · Space/Click to Jump',
+      reward: 'EVA Jetpack',
+    },
+    {
+      id: 'battery_rush',
+      pin: '2',
+      order: 2,
+      title: 'Battery Rush',
+      sector: 'Northern Solar Ridge',
+      tx: 18.5 * TILE_SIZE,
+      ty: 6 * TILE_SIZE,
+      wx: 18.5 * TILE_SIZE,
+      wy: 8 * TILE_SIZE,
+      completed: story.powerCouplerRecovered,
+      instructions:
+        'Head northwest to Outpost 02 at the Solar Ridge Power Grid. Use blue jump pads and your Jetpack, dodge pulsing and moving electric bars, and collect 10 batteries before the 01:30 timer runs out.',
+      controlsCue: 'Press E at Solar Grid · A/D + Space (01:30)',
+      reward: 'Power Coupler',
+    },
+    {
+      id: 'canyon_run',
+      pin: '3',
+      order: 3,
+      title: 'The Canyon Run',
+      sector: 'Southwest Red Canyon',
+      tx: 5.5 * TILE_SIZE,
+      ty: 30 * TILE_SIZE,
+      wx: 8 * TILE_SIZE,
+      wy: 30 * TILE_SIZE,
+      completed: story.antennaCableRecovered,
+      lockedReason: !story.jetpackUnlocked
+        ? 'Tip: Unlock Jetpack in Step [1] first (Jetpack assists wide gaps)'
+        : undefined,
+      instructions:
+        'Travel to the Southwest Red Canyon Ridge. Hold Space in mid-air to use your Jetpack across wide chasms, dodge falling boulders, and reach the final shelter.',
+      controlsCue: 'Press E at Canyon · Hold Space for Jetpack',
+      reward: 'Antenna Cable',
+    },
+    {
+      id: 'opportunity_explorer',
+      pin: '4',
+      order: 4,
+      title: 'Wake Up the Old Explorer',
+      sector: oppTarget.sector,
+      tx: oppTarget.x,
+      ty: oppTarget.y,
+      wx: oppTarget.wx,
+      wy: oppTarget.wy,
+      completed: story.signalProcessorRecovered,
+      instructions: oppTarget.instructions,
+      controlsCue: oppTarget.controlsCue,
+      reward: 'Signal Processor & Opportunity Archive',
+    },
+    {
+      id: 'dust_devil_chase',
+      pin: '5',
+      order: 5,
+      title: 'Run for Your Life',
+      sector: 'East Dust Corridor',
+      tx: 38 * TILE_SIZE,
+      ty: 18 * TILE_SIZE,
+      wx: 36 * TILE_SIZE,
+      wy: 18 * TILE_SIZE,
+      completed: story.dustDevilSurvived,
+      instructions:
+        'Approach the Weather Station east of the Crash Site. Outrun the Martian dust devil, jump rolling rocks, and hold S behind COVER boulders when gusts hit.',
+      controlsCue: 'Press E at Storm Pole · S behind Cover',
+      reward: 'Relay Corridor Cleared',
+    },
+    {
+      id: 'systems_repair',
+      pin: '6',
+      order: 6,
+      title: 'Fix the Signal',
+      sector: 'Northeast Highlands Relay Tower',
+      tx: 45.5 * TILE_SIZE,
+      ty: 10.5 * TILE_SIZE,
+      wx: 43 * TILE_SIZE,
+      wy: 11 * TILE_SIZE,
+      completed: story.relaySignalFixed,
+      lockedReason:
+        !story.powerCouplerRecovered ||
+        !story.antennaCableRecovered ||
+        !story.signalProcessorRecovered
+          ? 'Needs parts from Steps [2], [3], and [4] to transmit'
+          : undefined,
+      instructions:
+        'Climb to the Northeast Relay Tower. Install the Power Coupler, Antenna Cable, and Signal Processor, rotate circuit tiles to link PWR→ANT, tune to 97.4 MHz, and hold E to transmit.',
+      controlsCue: 'Press E at Relay Tower · Hold E to Transmit',
+      reward: 'Distress Signal & The Last Ping Finale',
+    },
+    {
+      id: 'rover_recovery',
+      pin: 'P',
+      order: 7,
+      title: 'Pathfinder Airbag Run',
+      sector: 'Western Crater Basin',
+      tx: 10.5 * TILE_SIZE,
+      ty: 11 * TILE_SIZE,
+      wx: 12.5 * TILE_SIZE,
+      wy: 11 * TILE_SIZE,
+      completed: pathfinderMission.completed,
+      instructions:
+        'Visit the abandoned Mars Pathfinder Rover in the Western Crater. Bounce across the Martian surface and collect 10 airbags to restore Ares IV landing cushioning.',
+      controlsCue: 'Press E at Pathfinder Rover · Space to Jump',
+      reward: '10 Pathfinder Airbags',
+    },
+    {
+      id: 'crashed_rocket',
+      pin: 'S',
+      order: 8,
+      title: 'Ares IV Spacecraft Repair',
+      sector: 'Central Crash Site',
+      tx: 28 * TILE_SIZE,
+      ty: 19 * TILE_SIZE,
+      wx: 28.5 * TILE_SIZE,
+      wy: 21.8 * TILE_SIZE,
+      completed: shipDone,
+      instructions:
+        'Salvage orange equipment crates across Mars and return to the Ares IV blue safety ring to repair Hull, Engines, Avionics, Power Core, and Pathfinder Cushioning.',
+      controlsCue: 'Press E at Spacecraft to Repair & Launch',
+      reward: 'Launch Home Victory',
+    },
+  ];
+
+  return rawDefs.map((d) => {
+    const dx = d.tx - player.x;
+    const dy = d.ty - player.y;
+    const distPx = Math.hypot(dx, dy);
+    return {
+      id: d.id,
+      pin: d.pin,
+      order: d.order,
+      title: d.title,
+      sector: d.sector,
+      targetX: d.tx,
+      targetY: d.ty,
+      walkX: d.wx,
+      walkY: d.wy,
+      completed: d.completed,
+      lockedReason: d.lockedReason,
+      instructions: d.instructions,
+      controlsCue: d.controlsCue,
+      reward: d.reward,
+      bearing: getCompassBearing(dx, dy),
+      distanceMeters: Math.max(0, Math.round(distPx / 2)),
+    };
+  });
+}
+
+export function resolveActiveObjective(
+  objectives: NavigationObjective[],
+  manualTrackedId: ObjectivePinId | null
+): NavigationObjective {
+  if (manualTrackedId) {
+    const found = objectives.find((o) => o.id === manualTrackedId);
+    if (found) return found;
+  }
+  const nextStory = objectives.find((o) => o.order <= 6 && !o.completed);
+  if (nextStory) return nextStory;
+  const nextExtra = objectives.find((o) => !o.completed);
+  return nextExtra ?? objectives[objectives.length - 1];
+}
+3. Guided Corner Minimap (src/components/ColonyHud.tsx — Map/Radar Section)
+Tsx
+const MINI_SCALE = 3.5; // 56*3.5 = 196, 38*3.5 = 133
+
+// Inside ColonyHud:
+const miniCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+const objectives = useMemo(() => buildNavigationObjectives(stats, player), [stats, player]);
+const activeObjective = useMemo(
+  () => resolveActiveObjective(objectives, trackedObjectiveId),
+  [objectives, trackedObjectiveId]
+);
+
+useEffect(() => {
+  if (!showRadar) return;
+  const canvas = miniCanvasRef.current;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.imageSmoothingEnabled = false;
+
+  // 1. Mars Terrain Base
+  for (let ty = 0; ty < MAP_H; ty++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const t = tiles[ty][tx];
+      ctx.fillStyle =
+        t === 'mountain_wall'
+          ? '#3d1712'
+          : t === 'ridge_rock'
+          ? '#75311c'
+          : t === 'crater_floor'
+          ? '#6b2c17'
+          : t === 'crater_rim'
+          ? '#b95f3a'
+          : t === 'scorch'
+          ? '#4a1f14'
+          : '#8e3d21';
+      ctx.fillRect(
+        Math.floor(tx * MINI_SCALE),
+        Math.floor(ty * MINI_SCALE),
+        Math.ceil(MINI_SCALE),
+        Math.ceil(MINI_SCALE)
+      );
+    }
+  }
+
+  // 2. Crash Site Safety Ring
+  const rcx = (CRASH_SITE_POS.tx + CRASH_SITE_POS.w / 2) * MINI_SCALE;
+  const rcy = (CRASH_SITE_POS.ty + CRASH_SITE_POS.h / 2) * MINI_SCALE;
+  const safeR = (CRASH_SAFE_RADIUS_PX / TILE_SIZE) * MINI_SCALE;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 2]);
+  ctx.beginPath();
+  ctx.arc(rcx, rcy, safeR, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  // 3. Salvage Dots
+  for (const s of structures) {
+    if (s.category !== 'exploration_site') continue;
+    const sx = (s.tx + s.w / 2) * MINI_SCALE;
+    const sy = (s.ty + s.h / 2) * MINI_SCALE;
+    ctx.fillStyle = s.salvaged ? 'rgba(148, 163, 184, 0.45)' : '#fb923c';
+    ctx.fillRect(Math.round(sx - 1), Math.round(sy - 1), 3, 3);
+  }
+
+  // 4. Opportunity Scanner Trail
+  if (stats.story.scannerTrailActive) {
+    ctx.save();
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    SCANNER_TRAIL_POINTS.forEach((pt, idx) => {
+      const mx = (pt.x / TILE_SIZE) * MINI_SCALE;
+      const my = (pt.y / TILE_SIZE) * MINI_SCALE;
+      if (idx === 0) ctx.moveTo(mx, my);
+      else ctx.lineTo(mx, my);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 5. Dashed Route Line from ROOK to Active Objective
+  const px = (player.x / TILE_SIZE) * MINI_SCALE;
+  const py = (player.y / TILE_SIZE) * MINI_SCALE;
+  const tx = (activeObjective.targetX / TILE_SIZE) * MINI_SCALE;
+  const ty = (activeObjective.targetY / TILE_SIZE) * MINI_SCALE;
+
+  ctx.save();
+  ctx.strokeStyle = '#fde047';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(tx, ty);
+  ctx.stroke();
+  ctx.restore();
+
+  // 6. Numbered Story Pins (1-6, P, S)
+  for (const obj of objectives) {
+    if (obj.id === 'crashed_rocket') continue; // Pin 1 sits at Crash Site; show Ship when 1-6 complete
+    const ox = (obj.targetX / TILE_SIZE) * MINI_SCALE;
+    const oy = (obj.targetY / TILE_SIZE) * MINI_SCALE;
+    const isCurrent = obj.id === activeObjective.id;
+
+    if (isCurrent) {
+      ctx.strokeStyle = '#fde047';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ox, oy, 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = obj.completed
+      ? '#15803d'
+      : isCurrent
+      ? '#d97706'
+      : '#1e293b';
+    ctx.strokeStyle = obj.completed
+      ? '#4ade80'
+      : isCurrent
+      ? '#fde047'
+      : '#fbbf24';
+    ctx.lineWidth = 1;
+    ctx.fillRect(Math.round(ox - 5), Math.round(oy - 5), 10, 10);
+    ctx.strokeRect(Math.round(ox - 5), Math.round(oy - 5), 10, 10);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 7px "Silkscreen", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(obj.pin, ox, oy + 0.5);
+  }
+
+  // 7. ROOK Position
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(Math.round(px - 3), Math.round(py - 3), 6, 6);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(Math.round(px - 2), Math.round(py - 2), 4, 4);
+}, [activeObjective, objectives, player.x, player.y, showRadar, stats.story.scannerTrailActive, structures, tiles]);
+Tsx
+{/* Guided Corner Minimap JSX */}
+{showRadar && (
+  <div className="pixel-panel-dark p-2 w-[216px] flex flex-col gap-1.5">
+    <div className="relative border border-[#1a0d0a] overflow-hidden group">
+      <canvas
+        ref={miniCanvasRef}
+        width={Math.round(MAP_W * MINI_SCALE)}
+        height={Math.round(MAP_H * MINI_SCALE)}
+        onClick={onOpenTacticalMap}
+        title="Click to expand Tactical Map & Instructions (G)"
+        className="w-full h-auto block pixelated cursor-pointer"
+      />
+      <button
+        type="button"
+        onClick={onOpenTacticalMap}
+        className="absolute top-1 right-1 bg-black/75 hover:bg-black/95 border border-stone-500/60 px-1.5 py-0.5 text-[9px] font-pixel text-amber-300 flex items-center gap-1 cursor-pointer"
+      >
+        <Maximize2 className="w-2.5 h-2.5" />
+        <span>EXPAND</span>
+      </button>
+    </div>
+
+    {/* Active Objective Direction & Instruction Strip */}
+    <div className="bg-[#1b1f24] border border-[#32373f] px-2 py-1.5 space-y-0.5">
+      <div className="flex items-center justify-between gap-1 text-[10px] font-mono-tabular">
+        <span className="font-bold text-amber-300 truncate">
+          [{activeObjective.pin}] {activeObjective.title}
+        </span>
+        <span className="text-sky-300 font-bold shrink-0">
+          {activeObjective.bearing} · {activeObjective.distanceMeters}m
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-1 text-[10px] text-stone-300">
+        <span className="truncate">{activeObjective.controlsCue}</span>
+        {trackedObjectiveId && (
+          <button
+            type="button"
+            onClick={onClearManualTrack}
+            className="text-amber-300 hover:text-amber-200 underline shrink-0 cursor-pointer"
+          >
+            Auto
+          </button>
+        )}
+      </div>
+    </div>
+  </div>
+)}
+4. Supporting Map Constants, Types, Styles & App.tsx Integration
+Map Constants (src/game/mapData.ts)
+Ts
+export const MAP_W = 56;
+export const MAP_H = 38;
+export const TILE_SIZE = 16;
+
+export const CRASH_SITE_POS = { tx: 25, ty: 17, w: 6, h: 4 };
+export const CRASH_SAFE_RADIUS_PX = 76;
+
+export const ROVER_TRACKS_TILE = { tx: 35, ty: 29 };
+export const OPPORTUNITY_TILE = { tx: 47, ty: 30 };
+
+export const SCANNER_TRAIL_POINTS: { x: number; y: number }[] = [
+  { x: 36 * TILE_SIZE, y: 29.5 * TILE_SIZE },
+  { x: 38 * TILE_SIZE, y: 29.8 * TILE_SIZE },
+  { x: 40 * TILE_SIZE, y: 30.3 * TILE_SIZE },
+  { x: 42 * TILE_SIZE, y: 30.8 * TILE_SIZE },
+  { x: 44 * TILE_SIZE, y: 31.1 * TILE_SIZE },
+  { x: 46 * TILE_SIZE, y: 31.0 * TILE_SIZE },
+  { x: 47.5 * TILE_SIZE, y: 30.9 * TILE_SIZE },
+];

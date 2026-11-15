@@ -1,0 +1,8 @@
+{
+  "name": "longwayhome",
+  "description": "A playable 2D top-down pixel-art Mars colony simulation where you walk across the base, maintain solar arrays and oxygen generators, mine Martian ore, and expand your settlement.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

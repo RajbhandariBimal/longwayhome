@@ -1,0 +1,138 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    background-color: #1b1210;
+  }
+}
+
+.font-pixel {
+  font-family: 'Silkscreen', monospace;
+}
+
+.font-mono-tabular {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Beveled pixel-art metallic panel look inspired by retro colony HUDs */
+.pixel-panel {
+  background-color: #4f5459;
+  border: 3px solid #1f2226;
+  box-shadow:
+    inset 2px 2px 0px #787e85,
+    inset -2px -2px 0px #33373b,
+    0 4px 0 rgba(12, 8, 6, 0.45);
+}
+
+.pixel-panel-dark {
+  background-color: #2f3338;
+  border: 3px solid #15171a;
+  box-shadow:
+    inset 2px 2px 0px #484d54,
+    inset -2px -2px 0px #1e2024,
+    0 6px 0 rgba(10, 6, 4, 0.55);
+}
+
+.pixel-btn {
+  border: 2px solid #181a1d;
+  box-shadow:
+    inset 2px 2px 0px rgba(255, 255, 255, 0.25),
+    inset -2px -2px 0px rgba(0, 0, 0, 0.3);
+  transition: transform 80ms ease, filter 120ms ease;
+}
+
+.pixel-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.pixel-btn:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    inset 1px 1px 0px rgba(0, 0, 0, 0.3),
+    inset -1px -1px 0px rgba(255, 255, 255, 0.15);
+}
+
+.font-stencil {
+  font-family: 'Black Ops One', Impact, sans-serif;
+}
+
+.font-tech {
+  font-family: 'Chakra Petch', 'Plus Jakarta Sans', sans-serif;
+}
+
+.font-mars {
+  font-family: 'Orbitron', 'Chakra Petch', sans-serif;
+}
+
+.bl-scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0) 0px,
+    rgba(255, 255, 255, 0) 2px,
+    rgba(0, 0, 0, 0.22) 3px,
+    rgba(0, 0, 0, 0.22) 4px
+  );
+}
+
+.bl-vignette {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.52) 100%
+  );
+}
+
+.bl-hazard-stripe {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #f59e0b 0px,
+    #f59e0b 10px,
+    #1c1610 10px,
+    #1c1610 20px
+  );
+}
+
+.bl-hazard-stripe-light {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #d97706 0px,
+    #d97706 10px,
+    #292524 10px,
+    #292524 20px
+  );
+}
+
+.bl-grid-backdrop {
+  background-image:
+    linear-gradient(to right, rgba(245, 158, 11, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(245, 158, 11, 0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+@keyframes bl-board-shake {
+  0%, 100% { transform: translate(0, 0); }
+  15% { transform: translate(-5px, 3px); }
+  30% { transform: translate(5px, -3px); }
+  45% { transform: translate(-4px, -2px); }
+  60% { transform: translate(4px, 2px); }
+  75% { transform: translate(-2px, 1px); }
+}
+
+.animate-bl-shake {
+  animation: bl-board-shake 0.42s ease-in-out;
+}
+
